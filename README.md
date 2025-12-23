@@ -28,17 +28,7 @@ pip install -e .[dev]
 ```
 
 ### Models and Datasets
-We first perform YARN fine-tuning on the EAGLE3 model. Our implementation is based on a modified version of [SpecForge](https://github.com/TanZhendong/SpecForge-Yarn), using 6,400 samples of the 32K PG-19 dataset for context extension (training dataset available here: [link](https://huggingface.co/datasets/hcyy/pg19-yarn-6400)).
-The speedup evaluation is conducted on the PG-19-test set (also released here: [link](https://huggingface.co/datasets/hcyy/pg19-test)).
-
-The shared checkpoints is available here: 
-
-| Models               | Draft Models                |
-| -------------------- | --------------------------- |
-| [LLaMA3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | [EAGLE3-LLaMA3.1-8B-YARN-64K](https://huggingface.co/TanBaby/EAGLE3-LLaMA3.1-Instruct-8B-YARN-64K) |
-| [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)            | [EAGLE3-Qwen3-4B-YARN-64K](https://huggingface.co/TanBaby/EAGLE3-Qwen3-4B-YARN-64K)   |
-| [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B)            | [EAGLE3-Qwen3-8B-YARN-64K](https://huggingface.co/TanBaby/EAGLE3-Qwen3-8B-YARN-64K)   |
-| [Qwen3-14B](https://huggingface.co/Qwen/Qwen3-14B)             | [EAGLE3-Qwen3-14B-YARN-64K](https://huggingface.co/TanBaby/EAGLE3-Qwen3-14B-YARN-64K)   |
+Considering the anonymity requirements, we will release the YARN-adapted models and datasets at a later stage.
 
 ### Usage
 You can find runnable examples in the `tests/` folder.  
@@ -93,13 +83,3 @@ We provide evaluation scripts in the `scripts/` directory. After running them, y
 
 ## Acknowledgements
 This project is inspired by [**EAGLE3**](https://github.com/SafeAILab/EAGLE) and [**TriForce**](https://github.com/Infini-AI-Lab/TriForce), and we gratefully acknowledge their excellent work.
-
-## Citation
-```
-@article{tan2025specpv,
-  title={SpecPV: Improving Self-Speculative Decoding for Long-Context Generation via Partial Verification},
-  author={Tan, Zhendong and Zhang, Xingjun and Hu, Chaoyi and Peng, Junjie and Xia, Kun},
-  journal={arXiv preprint arXiv:2512.02337},
-  year={2025}
-}
-```
