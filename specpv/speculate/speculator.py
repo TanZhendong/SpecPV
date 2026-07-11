@@ -252,7 +252,7 @@ class Speculator(nn.Module):
             self.base_model.model.tree_mask = tree_mask
             draft_tokens = draft_tokens.to(input_ids.device)
 
-            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and spec_config.enable_partial_kv:
+            if input_ids.shape[1] > partial_past_key_values.cache_config.static_kv_size and spec_config.enable_partial_kv:
                 partial_past_key_values.init_key_values(full_past_key_values)
 
             # Target model forward, get logits

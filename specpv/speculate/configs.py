@@ -9,8 +9,14 @@ class SpecConfig:
     
     # partial kv 
     block_size: int = 16
-    n_retrieval_blocks: int = 256      
-    partial_spec_tokens: int = 20       
+    n_retrieval_blocks: int = 256
+    partial_spec_tokens: int = 20
+    # KV selector used by the partial verifier.  "quest" is SpecPV's
+    # query-aware max/min block retrieval; "h2o" is the query-free,
+    # key-norm baseline used by the rebuttal experiment.
+    kv_selector: str = "quest"
+    n_sink_blocks: int = 2
+    n_window_blocks: int = 8
 
 
 

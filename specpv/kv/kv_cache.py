@@ -27,6 +27,7 @@ class CacheConfig:
     n_window_blocks: int = 8       
     n_spec_tokens_buf: int = 128       
     max_batch_size: int = 1            
+    selector: str = "quest"
 
     @property
     def sink_size(self) -> int:
@@ -42,7 +43,12 @@ class CacheConfig:
 
     @property
     def total_budget(self) -> int:
-        return self.sink_size + self.retrieval_size + self.window_size + self.n_spec_tokens_buf
+        return self.static_kv_size + self.n_spec_tokens_buf
+
+    @property
+    def static_kv_size(self) -> int:
+        """Number of persistent tokens visible to partial attention."""
+        return self.sink_size + self.retrieval_size + self.window_size
 
 
 class PartialKVCache(Cache):
@@ -143,33 +149,60 @@ class PartialKVCache(Cache):
     # from ..speculate.profile import record_time
     # @record_time("refresh_kv_cache")
     def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="mean"):
+        # Sliding-window and StreamingLLM have no retrieved partition.  They
+        # still use this refresh path to replace the recent window.
+        if self.cache_config.retrieval_size == 0:
+            window_size = self.cache_config.window_size
+            assert seq_len >= window_size, (
+                f"Window size {window_size} is larger than current sequence length {seq_len}."
+            )
+            win_slice = slice(seq_len - window_size, seq_len)
+            self.key_cache[layer_idx]["window"].copy_(
+                key_states[:, :, win_slice, :].to(self.key_cache[layer_idx]["window"].device, non_blocking=True)
+            )
+            self.value_cache[layer_idx]["window"].copy_(
+                value_states[:, :, win_slice, :].to(self.value_cache[layer_idx]["window"].device, non_blocking=True)
+            )
+            self.verified_lens[layer_idx] = 0
+            return
+
         # 1. update summary_key_states
         retrieval_len = seq_len - self.cache_config.window_size
         self.summary_key_states(key_states, retrieval_len, layer_idx)
         summary = self.key_states_summary[layer_idx]
         num_blocks = self.summary_block_count[layer_idx]
 
-        # 2. get scores [B,H,Q,D] x [B,H,N,D] -> [B,H,Q,N]
-        n_rep = int(query_states.size(1) // key_states.size(1))
-        summary_max = repeat_kv(summary["max"][:, :, :num_blocks, :], n_rep)
-        summary_min = repeat_kv(summary["min"][:, :, :num_blocks, :], n_rep)
-        sim_max = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_max)
-        sim_min = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_min)
-        scores = torch.maximum(sim_max, sim_min)  
-
-        # 3. reduce scores [B,H,N]
-        if reduce_type == "max":
-            scores = scores.max(dim=2).values  
-        elif reduce_type == "mean":
-            scores = scores.mean(dim=2)        
+        # 2. Score each non-sink block. Quest uses the current queries and
+        # per-dimension max/min summaries. H2O here is deliberately a
+        # query-free baseline: it ranks blocks by the mean L2 norm of keys.
+        if self.cache_config.selector == "quest":
+            n_rep = int(query_states.size(1) // key_states.size(1))
+            summary_max = repeat_kv(summary["max"][:, :, :num_blocks, :], n_rep)
+            summary_min = repeat_kv(summary["min"][:, :, :num_blocks, :], n_rep)
+            sim_max = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_max)
+            sim_min = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_min)
+            scores = torch.maximum(sim_max, sim_min)
+            if reduce_type == "max":
+                scores = scores.max(dim=2).values
+            elif reduce_type == "mean":
+                scores = scores.mean(dim=2)
+            else:
+                raise ValueError(f"Unknown reduce_type: {reduce_type}")
+            if n_rep > 1:
+                # Average query-head scores back to KV heads for GQA.
+                B, H, N = scores.shape
+                scores = scores.reshape(B, H // n_rep, n_rep, N).mean(dim=2)
+        elif self.cache_config.selector == "h2o":
+            block_size = self.cache_config.block_size
+            candidate_keys = key_states[
+                :, :, self.cache_config.sink_size : self.cache_config.sink_size + num_blocks * block_size, :
+            ]
+            candidate_keys = candidate_keys.reshape(
+                candidate_keys.size(0), candidate_keys.size(1), num_blocks, block_size, candidate_keys.size(-1)
+            )
+            scores = torch.linalg.vector_norm(candidate_keys.float(), dim=-1).mean(dim=-1)
         else:
-            raise ValueError(f"Unknown reduce_type: {reduce_type}")
-        if n_rep > 1:
-            # for GQA
-            B, H, N = scores.shape
-            H_kv = H // n_rep
-            scores = scores.reshape(B, H_kv, n_rep, N)
-            scores = scores.mean(dim=2)
+            raise ValueError(f"Unknown KV selector: {self.cache_config.selector}")
 
         # 4. top-k block selection
         topk_blocks = min(self.cache_config.n_retrieval_blocks, num_blocks)
@@ -184,7 +217,7 @@ class PartialKVCache(Cache):
         D = key_states.size(-1)
         # convert block indices → token indices
         token_offsets = torch.arange(block_size, device=top_indices.device)  # [block_size]
-        token_indices = top_indices[..., None] * block_size + token_offsets  # [B,H,K,block_size]
+        token_indices = self.cache_config.sink_size + top_indices[..., None] * block_size + token_offsets  # [B,H,K,block_size]
         token_indices = token_indices.reshape(B, H, K * block_size)          # [B,H,K*block_size]
         token_indices, _ = torch.sort(token_indices, dim=-1)
         token_indices_exp = token_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # [B,H,K*block_size,D] expand dim
@@ -284,8 +317,11 @@ def initialize_past_key_values(model, draft_model, cache_config, max_length=8192
     # init partial kv cache
     partial_cache_config = CacheConfig(
         block_size=cache_config.block_size, 
+        n_sink_blocks=cache_config.n_sink_blocks,
         n_retrieval_blocks=cache_config.n_retrieval_blocks, 
-        n_spec_tokens_buf=cache_config.partial_spec_tokens + draft_model.total_tokens + 1
+        n_window_blocks=cache_config.n_window_blocks,
+        n_spec_tokens_buf=cache_config.partial_spec_tokens + draft_model.total_tokens + 1,
+        selector=cache_config.kv_selector,
     )
     partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length, device=next(model.parameters()).device)
 
